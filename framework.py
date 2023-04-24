@@ -1,5 +1,6 @@
 import torch
 from torch.nn import functional as F
+from torch import finfo
 import multiprocessing
 from joblib import Parallel, delayed
 
@@ -7,12 +8,15 @@ class Framework:
 
     def __init__(self, x, nodes, n_leafnodes, max_depth) -> None:
         
-        nodes = [torch.mul, torch.add, torch.div, torch.sub,
+        nodes = [torch.mul, torch.add,
+                 lambda a, b: torch.div(a, b + 1e-9 * (b == 0)),
+                 torch.sub,
                  
                  lambda a, b : torch.sin(a), lambda a, b: torch.sin(b),
                  lambda a, b : torch.cos(a), lambda a, b: torch.cos(b),
                  lambda a, b : torch.exp(a), lambda a, b: torch.exp(b),
-                 lambda a, b : torch.log(a), lambda a, b: torch.log(b),
+                 lambda a, b : torch.log(torch.abs(a) + 1e-9 * (a == 0)),
+                 lambda a, b : torch.log(torch.abs(b) + 1e-9 * (b == 0)),
 
                  lambda a, b : torch.tensor(5).repeat(x.shape[0]),
                  lambda a, b : torch.tensor(3.141).repeat(x.shape[0])]
@@ -20,12 +24,12 @@ class Framework:
         nodes += [lambda a, b : x[:,i] for i in range(x.shape[1])]
 
         atomic_expr = [
-                lambda a, b : a+"*"+b, lambda a, b: a+"+"+b,
-                lambda a, b: a+'/'+b, lambda a, b: a + "-" + b,
+                lambda a, b : a+"*"+b, lambda a, b: "("+a+"+"+b+")",
+                lambda a, b : a+"/("+b+")", lambda a, b: "("+a+"-"+b+")",
                 lambda a, b : "sin(%s)"%a, lambda a, b: "sin(%s)"%b,
                 lambda a, b :"cos(%s)"%a, lambda a, b: "cos(%s)"%b,
                 lambda a, b : "exp(%s)"%a, lambda a, b: "exp(%s)"%b,
-                lambda a, b : "log(%s)"%a, lambda a, b: "log(%s)"%b,
+                lambda a, b : "log(|%s|)"%a, lambda a, b: "log(|%s|)"%b,
 
                 lambda a, b : "5",
                 lambda a, b : '\u03C0'
@@ -37,7 +41,7 @@ class Framework:
         self.max_depth, self.xdata = max_depth, x
         self.leaf_info = ((2**(max_depth+1)+1)//2, n_leafnodes)
         self.treeshape = (2**(max_depth+1)-1, len(nodes))
-        self.n_workers = multiprocessing.cpu_count()
+        self.n_workers = 1#multiprocessing.cpu_count()
 
     def new_population(self, population_size : int):
         sample_intern = torch.randint(0, self.treeshape[1]-self.leaf_info[1],
@@ -86,6 +90,9 @@ class Framework:
         return semantics
     
     def syntactic_embedding(self, x : torch.tensor):
+        if x.dim() == 1:
+            # --- single solution passed ---
+            x = x.unsqueeze(0)
         if x.dim() == 2:
             return F.one_hot(x, num_classes=self.treeshape[1])
         if x.dim() == 3:
@@ -111,14 +118,17 @@ class Framework:
     @torch.no_grad()
     def semantic_embedding(self, semantics : torch.tensor):
         
+        semantics.clamp_(-1e18, 1e18)
         embedding = torch.zeros((semantics.shape[0], *self.treeshape),
                                 requires_grad=False)
         for j in range(embedding.shape[0]):
+            # --- compare leaf functions at leaf node positions ---
             for i in range(self.treeshape[0]-1, self.treeshape[0]//2-1, -1):
                 embedding[j, i, :] = self._nodewise_semantic(
                     current_semantics = semantics[j, i],
                     domains = (None, None)
                     )
+            # --- compare all functions at internal node positions ---
             for i in range(self.treeshape[0]//2-1, -1, -1):
                 embedding[j, i, :] = self._nodewise_semantic(
                     current_semantics = semantics[j, i],
@@ -141,12 +151,12 @@ class Framework:
         indices = torch.argmax(population, dim=2)
         output = list()
 
-        # --- evaluate leaf nodes ---
         for j in range(indices.shape[0]):
             string = ['']*self.treeshape[0]
+            # --- stringify leaf nodes ---
             for i in range(self.treeshape[0]-1, self.treeshape[0]//2-1, -1):
                 string[i] = self.atomic_expr[indices[j, i].item()]('','')[:]
-
+            # --- stringify interanl nodes ---
             for i in range(self.treeshape[0]//2-1, -1, -1):
                 string[i] = self.atomic_expr[indices[j, i].item()](
                     string[2*(i+1)-1], string[2*(i+1)])

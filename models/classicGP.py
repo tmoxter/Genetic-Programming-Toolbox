@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 from copy import deepcopy
 import math
 
@@ -51,8 +52,10 @@ class ClassicGP:
                         subtree_ids.append(child2)
                         next_lvl.append(child2)
             
-            remainder_ids = list(set(range(tree_len)) - set(subtree_ids))
             subtree_ids = torch.tensor(subtree_ids)
+            remainder_ids = torch.from_numpy(np.setdiff1d(
+                np.arange(tree_len), subtree_ids.numpy())
+                )
             remainder_ids = torch.tensor(remainder_ids, dtype=int)
             offspring[parent_b_idx, subtree_ids, :] = population[parent_a_idx,
                                                         subtree_ids, :]
