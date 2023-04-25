@@ -18,11 +18,13 @@ class TrainerBase:
         """
         raise NotImplementedError
 
-    @abstractmethod
-    def _loss(self):
-        """
-        """
-        raise NotImplementedError
+    def _reconstruction_loss(self, y : torch.tensor, t: torch.tensor):
+        loss = self.criterion(y, t)
+        loss += sum(
+            p.abs().sum() for p in self.model.parameters()
+            ) * self.l1_coef
+        
+        return loss
 
 class TrainerDenseAE(TrainerBase):
 
@@ -34,14 +36,6 @@ class TrainerDenseAE(TrainerBase):
         self.optimizer = torch.optim.Adam(self.model.parameters(),
                                           lr=learning_rate)
         self.l1_coef = l1_coef
-    
-    def _loss(self, y : torch.tensor, t: torch.tensor):
-        loss = self.criterion(y, t)
-        loss += sum(
-            p.abs().sum() for p in self.model.parameters()
-            ) * self.l1_coef
-        
-        return loss
 
     def train(self, population : torch.tensor, num_epochs : int,
               batch_size : int):
@@ -59,7 +53,47 @@ class TrainerDenseAE(TrainerBase):
                 outputs = nn.functional.softmax(outputs, dim = 2)
                 data = (data == torch.max(data, dim=2,
                                             keepdim=True).values).float()
-                loss = self._loss(outputs, data)
+                loss = self._reconstruction_loss(outputs, data)
+                loss.backward()
+                self.optimizer.step()
+                
+                running_loss += loss.item()
+            
+            print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {running_loss:.4f}')
+            if self.writer:
+                self.writer.add_scalar("Loss/train", running_loss, self.total_epochs+epoch)
+        
+        self.total_epochs += num_epochs
+
+class TrainerRNNAE(TrainerBase):
+
+    def __init__(self, model: nn.Module, writer: SummaryWriter,
+                learning_rate : float, l1_coef : float) -> None:
+        
+        super().__init__(model, writer)
+
+        self.criterion = nn.CrossEntropyLoss()
+        self.optimizer = torch.optim.Adam(self.model.parameters(),
+                                          lr=learning_rate)
+        self.l1_coef = l1_coef
+
+    def train(self, population : torch.tensor, num_epochs : int,
+              batch_size : int):
+
+        dataset = PopulationData(population)
+        train_loader = DataLoader(dataset, batch_size, shuffle=True)
+
+        self.model.train()
+        for epoch in range(num_epochs):
+            running_loss = 0.0
+            
+            for data in train_loader:
+                self.optimizer.zero_grad()
+                outputs = self.model(data)
+                outputs = nn.functional.softmax(outputs, dim = 2)
+                data = (data == torch.max(data, dim=2,
+                                            keepdim=True).values).float()
+                loss = self._reconstruction_loss(outputs, data)
                 loss.backward()
                 self.optimizer.step()
                 
