@@ -25,6 +25,18 @@ class TrainerBase:
             ) * self.l1_coef
         
         return loss
+    
+    @torch.no_grad()
+    def accuracy(self, x : torch.tensor):
+        """
+        Note-wise (not tree-wise) accuracy
+        """
+        self.model.eval()
+
+        x_ = self.model(x)
+        recon = torch.argmax(x_, dim=2)
+        target = torch.argmax(x, dim=2)
+        return (recon == target).type(torch.float).mean()
 
 class TrainerDenseAE(TrainerBase):
 
