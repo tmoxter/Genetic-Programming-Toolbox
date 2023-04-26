@@ -6,7 +6,7 @@ from joblib import Parallel, delayed
 
 class Framework:
 
-    def __init__(self, x, nodes, n_leafnodes, max_depth) -> None:
+    def __init__(self, x, nodes, n_constants, max_depth) -> None:
         
         nodes = [torch.mul, torch.add,
                  lambda a, b: torch.div(a, b + 1e-9 * (b == 0)),
@@ -35,13 +35,14 @@ class Framework:
                 lambda a, b : '\u03C0'
         ]
         atomic_expr += [lambda a, b : "x_%s"%i for i in range(x.shape[1])]
+        n_constants = 2
 
         self.nodes = {key: val for key, val in enumerate(nodes)}
         self.atomic_expr = {key: val for key, val in enumerate(atomic_expr)}
         self.max_depth, self.xdata = max_depth, x
-        self.leaf_info = ((2**(max_depth+1)+1)//2, n_leafnodes)
+        self.leaf_info = ((2**(max_depth+1)+1)//2, n_constants+x.shape[1])
         self.treeshape = (2**(max_depth+1)-1, len(nodes))
-        self.n_workers = 1#multiprocessing.cpu_count()
+        self.n_workers = multiprocessing.cpu_count()
 
     def new_population(self, population_size : int):
         sample_intern = torch.randint(0, self.treeshape[1]-self.leaf_info[1],
@@ -56,20 +57,20 @@ class Framework:
         sample = torch.randint(0, treeshape[1],(1, treeshape[0]))
         return self.syntactic_embedding(sample)
     
-    def _evaluate_atomic_functions(self, indices : torch.tensor, shape : tuple,
-                                  alphabet : dict, touched_genes : list = None):
+    def _evaluate_atomic_functions(self, indices : torch.tensor,
+                                   touched_genes : list = None):
         
-        semantics = torch.zeros(indices.shape[0], shape[0], shape[1],
-                                requires_grad=False)
+        semantics = torch.zeros(indices.shape[0], self.treeshape[0],
+                                self.xdata.shape[0], requires_grad=False)
         
         # --- evaluate leaf nodes ---
         for j in range(semantics.shape[0]):
-            for i in range(shape[0]-1, shape[0]//2-1, -1):
-                semantics[j, i, :] = alphabet[indices[j, i].item()]('','')[:]
+            for i in range(self.treeshape[0]-1, self.treeshape[0]//2-1, -1):
+                semantics[j, i, :] = self.nodes[indices[j, i].item()]('','')[:]
 
         # --- evaluate internal nodes ---
-            for i in range(shape[0]//2-1, -1, -1):
-                semantics[j, i, :] = alphabet[indices[j, i].item()](
+            for i in range(self.treeshape[0]//2-1, -1, -1):
+                semantics[j, i, :] = self.nodes[indices[j, i].item()](
                     semantics[j, 2*(i+1)-1, :],semantics[j, 2*(i+1), :])
                                                 
         return semantics
@@ -77,15 +78,15 @@ class Framework:
     @torch.no_grad()
     def evaluate(self, population : torch.tensor):
         indices = torch.argmax(population, dim=2)
+        batch = population.shape[0] // self.n_workers
         semantics = torch.vstack(
             Parallel(n_jobs=self.n_workers)(
             delayed(self._evaluate_atomic_functions)(
-            indices[i::self.n_workers],
-            shape = (self.treeshape[0], self.xdata.shape[0]),
-            alphabet = self.nodes
+                indices[i*batch:min((i+1)*batch, indices.shape[0])]
             )
-            for i in range(self.n_workers)
-        ))
+            for i in range(self.n_workers+1)
+            )
+        )
 
         return semantics
     
@@ -96,7 +97,12 @@ class Framework:
         if x.dim() == 2:
             return F.one_hot(x, num_classes=self.treeshape[1])
         if x.dim() == 3:
-            indices = torch.argmax(x, dim=2)
+            internal_idx = torch.argmax(x[:, :self.treeshape[0]//2, :], dim=2)
+            leaf_idx = torch.argmax(x[:, self.treeshape[0]//2:,
+                                self.treeshape[1]-self.leaf_info[1]:], dim=2)
+            indices = torch.cat([
+              internal_idx, leaf_idx + self.treeshape[1]-self.leaf_info[1]
+            ], dim = 1)
             return F.one_hot(indices, num_classes=self.treeshape[1])
 
     def _nodewise_semantic(self, current_semantics: torch.tensor,
@@ -114,32 +120,46 @@ class Framework:
         #masked[sort] = F.softmax(encoded[sort], dim=0)
         masked[sort] = encoded[sort] / encoded[sort].sum()
         return masked
-
-    @torch.no_grad()
-    def semantic_embedding(self, semantics : torch.tensor):
+    
+    def _semantic_batch(self, batch : torch.tensor):
         
-        semantics.clamp_(-1e18, 1e18)
-        embedding = torch.zeros((semantics.shape[0], *self.treeshape),
+        embedding = torch.zeros((batch.shape[0], *self.treeshape),
                                 requires_grad=False)
         for j in range(embedding.shape[0]):
             # --- compare leaf functions at leaf node positions ---
             for i in range(self.treeshape[0]-1, self.treeshape[0]//2-1, -1):
                 embedding[j, i, :] = self._nodewise_semantic(
-                    current_semantics = semantics[j, i],
+                    current_semantics = batch[j, i],
                     domains = (None, None)
                     )
             # --- compare all functions at internal node positions ---
             for i in range(self.treeshape[0]//2-1, -1, -1):
                 embedding[j, i, :] = self._nodewise_semantic(
-                    current_semantics = semantics[j, i],
-                    domains = (semantics[j, 2*(i+1)-1], semantics[j, 2*(i+1)])
+                    current_semantics = batch[j, i],
+                    domains = (batch[j, 2*(i+1)-1], batch[j, 2*(i+1)])
                     )
+        return embedding
+
+    @torch.no_grad()
+    def semantic_embedding(self, semantics : torch.tensor):
+        
+        batch = semantics.shape[0] // self.n_workers
+        embedding = torch.vstack(
+            Parallel(n_jobs=self.n_workers)(
+            delayed(self._semantic_batch)(
+                semantics[i*batch:min((i+1)*batch, semantics.shape[0])]
+            )
+            for i in range(self.n_workers+1)
+            )
+        )
+
         return embedding
     
     def fitness(self, semantics : torch.tensor, target : torch.tensor):
-
         se = (semantics[:, 0, :] - target.repeat(semantics.shape[0], 1))**2
-        return se.mean(dim = 1)
+        mse = se.mean(dim = 1)
+        mse[torch.isnan(mse)] = 1e18
+        return -mse
 
     def as_tree(self):
         raise NotImplementedError
