@@ -3,8 +3,7 @@
 # ----------------------------------------------#
 
 import torch
-import numpy as np
-import math
+from typing import Any
 import multiprocessing
 from joblib import Parallel, delayed
 
@@ -16,8 +15,8 @@ class SeiaGP:
         self.framework = framework
         self.n_workes = multiprocessing.cpu_count()
     
-    def variation(self, semantics : torch.tensor,
-                 step_size : float) -> torch.tensor:
+    def variation(self, population : Any, semantics : torch.tensor,
+                 step_size : float = 1.75) -> torch.tensor:
         
         embedded_space = self.framework.semantic_embedding(semantics)
         angle = torch.rand_like(embedded_space).flatten(1)

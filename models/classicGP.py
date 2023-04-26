@@ -4,15 +4,20 @@ from copy import deepcopy
 import math
 
 from framework import Framework
+
 class ClassicGP:
 
     def __init__(self, framework : Framework) -> None:
         self.framework = framework
 
-    def variation(self, population : torch.tensor,
-                  mutation_chance : float = .1) -> torch.tensor:
+    def variation(self, population : torch.tensor, _,
+                  mutation_chance : float = 0.1,
+                  use_crossover : bool = True) -> torch.tensor:
         
-        offspring = self._crossover(population, uniform_depth=True)
+        if use_crossover:
+            offspring = self._crossover(population, uniform_depth=True)
+        else:
+            offspring = deepcopy(population)
         return self._mutation(offspring, mutation_chance)
 
     def _crossover(self, population : torch.tensor,
@@ -55,8 +60,7 @@ class ClassicGP:
             subtree_ids = torch.tensor(subtree_ids)
             remainder_ids = torch.from_numpy(np.setdiff1d(
                 np.arange(tree_len), subtree_ids.numpy())
-                )
-            remainder_ids = torch.tensor(remainder_ids, dtype=int)
+                ).type(torch.long)
             offspring[parent_b_idx, subtree_ids, :] = population[parent_a_idx,
                                                         subtree_ids, :]
             offspring[parent_a_idx, subtree_ids, :] = population[parent_b_idx,
