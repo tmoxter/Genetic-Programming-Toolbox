@@ -3,29 +3,32 @@ import torch.nn as nn
 from copy import deepcopy
 
 class DenseAutoencoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim):
+    def __init__(self, input_dim, hidden_dim, n_decoder_heads : int = 1):
         super(DenseAutoencoder, self).__init__()
+
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.LeakyReLU())
-            
-        self.decoder = nn.Sequential(
-            nn.Linear(hidden_dim, input_dim),
-            nn.LeakyReLU())
+        
+        self.decoder = [nn.Sequential(nn.Linear(hidden_dim, input_dim),
+                         nn.LeakyReLU()) for _ in range(n_decoder_heads)]
         
         self.input_dim = input_dim
 
     def forward(self, x : torch.tensor):
         
         reshape = x.shape
-        x = x.view(x.size(0), -1)
-        x = x.type(torch.float)
-        x = self.encoder(x)
-        x = self.decoder(x)
-        x = x.reshape(reshape)
-        return x
+        x = x.view(x.size(0), -1).type(torch.float)
+        x_ = self.encoder(x)
+        
+        y = torch.cat([
+            head(x_).unsqueeze(0) for head in self.decoder
+        ])
+
+        y = y.reshape(y.shape[0], *reshape)
+        return y
     
-    def vary(self, x : torch.tensor):
+    def variation(self, x : torch.tensor):
 
         x = deepcopy(x)
         reshape = x.shape
