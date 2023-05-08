@@ -153,12 +153,12 @@ class Framework:
             )
         )
 
-        return embedding
+        return embedding.nan_to_num(0, 1e9, -1e9)
     
     def fitness(self, semantics : torch.tensor, target : torch.tensor):
         se = (semantics[:, 0, :] - target.repeat(semantics.shape[0], 1))**2
         mse = se.mean(dim = 1)
-        mse[torch.isnan(mse)] = 1e18
+        mse.nan_to_num_(1e6, 1e6, 1e6)
         return -mse
 
     def as_tree(self):

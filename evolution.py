@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 from joblib.parallel import Parallel, delayed
 import pandas as pd
+from torch.utils.tensorboard import SummaryWriter
 from copy import deepcopy
 from framework import Framework
 #import cProfile as profiler
@@ -35,7 +36,7 @@ class Evolution:
         tournament_size : int = -1,
         population_size : int = 100,
         max_evals : int = None, max_gens : int = 100, max_time : int = None,
-        verbose : bool = False, writer : object = None,
+        verbose : bool = False, writer : SummaryWriter = None,
         ) -> None:
 
         self.framework, self.model = framework, model
@@ -44,7 +45,7 @@ class Evolution:
         self.tournament_size = tournament_size
         self.max_evals, self.max_gens = max_evals, max_gens
         self.max_time = max_time
-        self.verbose, self.log = verbose, writer
+        self.verbose, self.writer = verbose, writer
 
         self.best_t = list()
         self.best_f = list()
@@ -52,6 +53,7 @@ class Evolution:
         self.time_at_gen, self.eval_at_gen = [], []
         self.save_data = []
         self.n_rejected = [0, 0]
+        self.num_gens, self.num_evals, self.prev_time = 0, 0, 0.
         
     def evolve(self, proceed : bool = False) -> None:
         """Initialize new generation and evolve until termination criteria are met.
@@ -63,6 +65,8 @@ class Evolution:
         ------
         None
         """
+        if proceed:
+            self.start_time = time.time()-self.prev_time
         if not proceed:
             self.start_time = time.time()
             self.num_gens, self.num_evals = 0, 0
@@ -85,11 +89,11 @@ class Evolution:
                     #"df_median":torch.tensor(self.df_gen)
                 }
             )
-            if self.log:
-                self.log.add_scalar("Best v. nGen", 
+            if self.writer:
+                self.writer.add_scalar("Best v. nGen", 
                     self.best_f[-1], self.num_gens)
-                self.log.add_scalar("Pop Fitness v. nGen",
-                    self.fitnesses.sum().item(), self.num_gens)
+                self.writer.add_scalar("Median Fitness v. nGen",
+                    self.fitnesses.median().item(), self.num_gens)
             if self.verbose:
                 print("Gen: {}, evals: {}, best of gen fitness: {:.5f}, gen fitness: {:.3f}"\
                     .format(self.num_gens, self.num_evals, self.best_f[-1],
@@ -97,6 +101,7 @@ class Evolution:
                 )
     
         self.results = pd.DataFrame.from_dict(self.save_data)
+        self.prev_time = time.time() - self.start_time
     
     def _initialize_population(self):
         """Initialize the start population and evaluate its fitness"""
@@ -110,8 +115,9 @@ class Evolution:
         self.df_gen, self.d2_gen, self.n_rejected = [], [], [0,0]
 
         # --- variation --- 
-        #offspring = self.model.variation(self.population)
-        offspring = deepcopy(self.population)
+        offspring = self.model.variation(self.population, self.semantics)
+        assert offspring.shape == self.population.shape,\
+            "Model returned missshaped offspring after variation"
         offspring_semantics = self.framework.evaluate(offspring)
         offspring_fitnesses = self.framework.fitness(offspring_semantics,
                                                      self.data_y)
