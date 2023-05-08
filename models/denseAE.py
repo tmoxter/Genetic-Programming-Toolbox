@@ -8,13 +8,19 @@ class DenseAutoencoder(nn.Module):
 
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
-            nn.LeakyReLU())
+            nn.Tanh())
         
-        self.decoder = [nn.Sequential(nn.Linear(hidden_dim, input_dim),
-                         nn.LeakyReLU()) for _ in range(n_decoder_heads)]
+        for n in range(n_decoder_heads):
+            self.__dict__["_modules"][f"deco_head{n}"] = nn.Sequential(
+                nn.Linear(hidden_dim, input_dim), nn.LeakyReLU()
+                )
+
+        self.decoder = [self.__dict__["_modules"][f"deco_head{n}"]
+                          for n in range(n_decoder_heads)]
         
         self.input_dim = input_dim
         self.framework = framework
+        self.n_decoder_heads = n_decoder_heads
 
     def forward(self, x : torch.tensor):
         
