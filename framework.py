@@ -1,6 +1,6 @@
 import torch
 from torch.nn import functional as F
-from torch import finfo
+from itertools import product
 import multiprocessing
 from joblib import Parallel, delayed
 
@@ -18,10 +18,12 @@ class Framework:
                  lambda a, b : torch.log(torch.abs(a) + 1e-9 * (a == 0)),
                  lambda a, b : torch.log(torch.abs(b) + 1e-9 * (b == 0)),
 
-                 lambda a, b : torch.tensor(5).repeat(x.shape[0]),
-                 lambda a, b : torch.tensor(3.141).repeat(x.shape[0])]
+                 lambda a, b : torch.tensor(6).repeat(x.shape[0])
+                 #lambda a, b : torch.tensor(3.141).repeat(x.shape[0])
+                 ]
         
-        nodes += [lambda a, b : x[:,i] for i in range(x.shape[1])]
+        nodes += [lambda a, b, coef=i: x[:,coef]
+                  for i in range(x.shape[1])]
 
         atomic_expr = [
                 lambda a, b : a+"*"+b, lambda a, b: "("+a+"+"+b+")",
@@ -31,11 +33,12 @@ class Framework:
                 lambda a, b : "exp(%s)"%a, lambda a, b: "exp(%s)"%b,
                 lambda a, b : "log(|%s|)"%a, lambda a, b: "log(|%s|)"%b,
 
-                lambda a, b : "5",
-                lambda a, b : '\u03C0'
+                lambda a, b : "6"
+                #lambda a, b : '\u03C0'
         ]
-        atomic_expr += [lambda a, b : "x_%s"%i for i in range(x.shape[1])]
-        n_constants = 2
+        atomic_expr += [lambda a, b, coef=i: "x_%s"%coef
+                        for i in range(x.shape[1])]
+        n_constants = 1
 
         self.nodes = {key: val for key, val in enumerate(nodes)}
         self.atomic_expr = {key: val for key, val in enumerate(atomic_expr)}
@@ -56,6 +59,19 @@ class Framework:
         treeshape = (2**(max_depth+1)-1, len(self.nodes))
         sample = torch.randint(0, treeshape[1],(1, treeshape[0]))
         return self.syntactic_embedding(sample)
+    
+    def resample_repair_population(self, population_size : int,
+                                            ydata : torch.tensor):
+        sample = self.new_population(population_size)
+        fitness = self.fitness(self.evaluate(sample), ydata)
+        median = torch.median(fitness)
+        while torch.any(fitness < median):
+            idx = fitness < median
+            resample = self.new_population(population_size)
+            resample_fitness = self.fitness(self.evaluate(resample), ydata)
+            sample[idx, :, :] = resample[torch.argsort(resample_fitness)][-idx.sum():]
+            fitness = self.fitness(self.evaluate(sample), ydata)
+        return sample, fitness
     
     def _evaluate_atomic_functions(self, indices : torch.tensor,
                                    touched_genes : list = None):
@@ -182,4 +198,102 @@ class Framework:
                     string[2*(i+1)-1], string[2*(i+1)])
             output.append(string[0])
         return output
+    
+    def hamming_distance(self, population0 : torch.Tensor,
+                        population1 : torch.Tensor):
+        """
+        Calculate the hamming distance between two populations.
+        Parameters
+        ----------
+        population :torch.Tensor
+            population of trees
+
+        offspring :torch.Tensor
+            offspring of population
+
+        Returns
+        -------
+        :torch.Tensor: hamming distance between population and offspring
+        """
+        population_ids = torch.argmax(population0, dim=2)
+        offspring_ids = torch.argmax(population1, dim=2)
+        return torch.sum(population_ids != offspring_ids, dim=1)
+    
+    def latent_distance(self, population0 : torch.Tensor,
+                        population1 : torch.Tensor, model : torch.nn.Module):
+        """
+        Calculate the latent distance between two populations.
+        Parameters
+        ----------
+        population :torch.Tensor
+            population of trees
+
+        offspring :torch.Tensor
+            offspring of population
+
+        Returns
+        -------
+        :torch.Tensor: latent distance between population and offspring
+        """
+        latent0 = model.encoder(population0.reshape(population0.size(0),
+                                    -1).type(torch.float))
+        latent1 = model.encoder(population1.reshape(population1.size(0),
+                                    -1).type(torch.float))
+
+        return torch.sum((latent0 - latent1)**2, dim=1)**.5
         
+
+    def semantic_distance(self, semantics0 : torch.Tensor,
+                                semantics1 : torch.Tensor):
+        """
+        Calculate the semantic distance between two populations.
+        Parameters
+        ----------
+        population :torch.Tensor
+            semantics of population
+
+        offspring :torch.Tensor
+            semantics of offspring after variation of population
+        
+        Returns
+        ---------
+        :torch.Tensor: semantic distance between population and offspring"""
+        return torch.sum((semantics0[:, 0, :]
+                            - semantics1[:, 0, :])**2, dim=1)**.5
+    
+    def fitness_distance(self, fitness0 : torch.Tensor,
+                               fitness1 : torch.Tensor):
+        """
+        Calculate the fitness distance between two populations.
+        Parameters
+        ----------
+        population :torch.Tensor
+            fitness of population
+
+        offspring :torch.Tensor
+            fitness of offspring after variation of population
+        
+        Returns
+        ---------
+        :torch.Tensor: fitness distance between population and offspring"""
+        return torch.abs(fitness0 - fitness1)
+    
+    def enumerate_full_space(self):
+        """
+        Enumerate the full space of possible trees with the given
+        framework parameters.
+        Returns
+        -------
+        :torch.Tensor: full space of possible trees
+        """
+        assert self.treeshape[0] < 8, "Too many nodes to enumerate"
+        space_size = self.treeshape[1]**(self.treeshape[0]//2)\
+                    *self.leaf_info[1]**(self.treeshape[0]//2+1)
+        leaf_min_val = self.treeshape[1] - self.leaf_info[1]
+        leaf_min_id = self.treeshape[0]//2+1
+        space_ids = torch.cartesian_prod(*(torch.arange(self.treeshape[1]).expand(self.treeshape[0], -1)))
+        space_ids = space_ids[(space_ids[:, -leaf_min_id:] >= leaf_min_val).all(dim=1)]
+
+        assert space_ids.shape[0] == space_size, "Space size mismatch"
+
+        return self.syntactic_embedding(space_ids)
