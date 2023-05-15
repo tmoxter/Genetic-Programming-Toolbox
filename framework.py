@@ -6,45 +6,12 @@ from joblib import Parallel, delayed
 
 class Framework:
 
-    def __init__(self, x, nodes, n_constants, max_depth) -> None:
+    def __init__(self, x, nodes, max_depth) -> None:
         
-        nodes = [torch.mul, torch.add,
-                 lambda a, b: torch.div(a, b + 1e-9 * (b == 0)),
-                 torch.sub,
-                 
-                 lambda a, b : torch.sin(a), lambda a, b: torch.sin(b),
-                 lambda a, b : torch.cos(a), lambda a, b: torch.cos(b),
-                 lambda a, b : torch.exp(a), lambda a, b: torch.exp(b),
-                 lambda a, b : torch.log(torch.abs(a) + 1e-9 * (a == 0)),
-                 lambda a, b : torch.log(torch.abs(b) + 1e-9 * (b == 0)),
-
-                 lambda a, b : torch.tensor(6).repeat(x.shape[0])
-                 #lambda a, b : torch.tensor(3.141).repeat(x.shape[0])
-                 ]
-        
-        nodes += [lambda a, b, coef=i: x[:,coef]
-                  for i in range(x.shape[1])]
-
-        atomic_expr = [
-                lambda a, b : a+"*"+b, lambda a, b: "("+a+"+"+b+")",
-                lambda a, b : a+"/("+b+")", lambda a, b: "("+a+"-"+b+")",
-                lambda a, b : "sin(%s)"%a, lambda a, b: "sin(%s)"%b,
-                lambda a, b :"cos(%s)"%a, lambda a, b: "cos(%s)"%b,
-                lambda a, b : "exp(%s)"%a, lambda a, b: "exp(%s)"%b,
-                lambda a, b : "log(|%s|)"%a, lambda a, b: "log(|%s|)"%b,
-
-                lambda a, b : "6"
-                #lambda a, b : '\u03C0'
-        ]
-        atomic_expr += [lambda a, b, coef=i: "x_%s"%coef
-                        for i in range(x.shape[1])]
-        n_constants = 1
-
-        self.nodes = {key: val for key, val in enumerate(nodes)}
-        self.atomic_expr = {key: val for key, val in enumerate(atomic_expr)}
+        n_constants = self._gen_alphabet(nodes, x)
         self.max_depth, self.xdata = max_depth, x
         self.leaf_info = ((2**(max_depth+1)+1)//2, n_constants+x.shape[1])
-        self.treeshape = (2**(max_depth+1)-1, len(nodes))
+        self.treeshape = (2**(max_depth+1)-1, len(self.nodes))
         self.n_workers = multiprocessing.cpu_count()
 
     def new_population(self, population_size : int):
@@ -297,3 +264,82 @@ class Framework:
         assert space_ids.shape[0] == space_size, "Space size mismatch"
 
         return self.syntactic_embedding(space_ids)
+
+    def _gen_alphabet(self, nodes : list, x : torch.tensor):
+        """Return the torch callables as well string representations of the
+        nodes in the framework alphabet.
+        
+        Parameters
+        ----------
+        nodes : list
+            The list of nodes to be used
+        
+        Returns
+        -------
+        n_constants : int
+            The number of constants used
+        """
+
+        alphabet_callable = {
+            "+": [torch.add],
+            "-": [torch.sub],
+            "*": [torch.mul],
+            "/": [lambda a, b: torch.div(a, b + 1e-9 * (b == 0))],
+            "sin": [lambda a, b : torch.sin(a), lambda a, b: torch.sin(b)],
+            "cos": [lambda a, b : torch.cos(a), lambda a, b: torch.cos(b)],
+            "exp": [lambda a, b : torch.exp(a), lambda a, b: torch.exp(b)],
+            "log": [lambda a, b : torch.log(torch.abs(a) + 1e-9 * (a == 0)),
+                    lambda a, b : torch.log(torch.abs(b) + 1e-9 * (b == 0))],
+            "tan": [lambda a, b : torch.tan(a), lambda a, b: torch.tan(b)],
+            "sqrt": [lambda a, b : torch.sqrt(torch.abs(a) + 1e-9 * (a == 0)),
+                    lambda a, b : torch.sqrt(torch.abs(b) + 1e-9 * (b == 0))],
+            "pow2": [lambda a, b : torch.pow(a, 2), lambda a, b: torch.pow(b, 2)],
+            "pow3": [lambda a, b : torch.pow(a, 3), lambda a, b: torch.pow(b, 3)],
+            "pow4": [lambda a, b : torch.pow(a, 4), lambda a, b: torch.pow(b, 4)]
+        }
+        alphabet_str = {
+            "+": [lambda a, b : "(%s+%s)"%(a, b)],
+            "-": [lambda a, b : "(%s-%s)"%(a, b)],
+            "*": [lambda a, b : "(%s*%s)"%(a, b)],
+            "/": [lambda a, b : a+"/("+b+")"],
+            "sin": [lambda a, b : "sin(%s)"%a, lambda a, b: "sin(%s)"%b],
+            "cos": [lambda a, b : "cos(%s)"%a, lambda a, b: "cos(%s)"%b],
+            "exp": [lambda a, b : "exp(%s)"%a, lambda a, b: "exp(%s)"%b],
+            "log": [lambda a, b : "log(|%s|)"%a, lambda a, b: "log(|%s|)"%b],
+            "tan": [lambda a, b : "tan(%s)"%a, lambda a, b: "tan(%s)"%b],
+            "sqrt": [lambda a, b : "sqrt(%s)"%a, lambda a, b: "sqrt(%s)"%b],
+            "pow2": [lambda a, b : "(%s)^2"%a, lambda a, b: "(%s)^2"%b],
+            "pow3": [lambda a, b : "(%s)^3"%a, lambda a, b: "(%s)^3"%b],
+            "pow4": [lambda a, b : "(%s)^4"%a, lambda a, b: "(%s)^4"%b]
+        }
+
+        constants_str = lambda c: c if c[:4] != "3.14" else '\u03C0'
+
+        used_callabel = list()
+        used_str = list()
+        n_constants = 0
+        for node in nodes:
+            if node in alphabet_callable.keys():
+                used_callabel += alphabet_callable[node]
+                used_str += alphabet_str[node]
+            else:
+                try:
+                    used_callabel.append(
+                        lambda a, b : torch.tensor(float(node)).repeat(x.shape[0])
+                    )
+                    used_str.append(
+                        lambda a, b, : constants_str(node)
+                    )
+                    n_constants += 1
+                except ValueError:
+                    raise ValueError("Node {} not in alphabet".format(node))
+        
+        used_callabel += [lambda a, b, coef=i: x[:,coef]
+                            for i in range(x.shape[1])]
+        used_str += [lambda a, b, coef=i: "x_%s"%coef
+                            for i in range(x.shape[1])]
+        
+        self.nodes = {key: val for key, val in enumerate(used_callabel)}
+        self.atomic_expr = {key: val for key, val in enumerate(used_str)}
+        
+        return n_constants
