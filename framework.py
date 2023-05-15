@@ -7,7 +7,7 @@ from joblib import Parallel, delayed
 class Framework:
 
     def __init__(self, x, nodes, max_depth) -> None:
-        
+
         n_constants = self._gen_alphabet(nodes, x)
         self.max_depth, self.xdata = max_depth, x
         self.leaf_info = ((2**(max_depth+1)+1)//2, n_constants+x.shape[1])
@@ -202,10 +202,13 @@ class Framework:
         -------
         :torch.Tensor: latent distance between population and offspring
         """
-        latent0 = model.encoder(population0.reshape(population0.size(0),
-                                    -1).type(torch.float))
-        latent1 = model.encoder(population1.reshape(population1.size(0),
-                                    -1).type(torch.float))
+        try:
+            latent0 = model.encoder(population0.reshape(population0.size(0),
+                                        -1).type(torch.float))
+            latent1 = model.encoder(population1.reshape(population1.size(0),
+                                        -1).type(torch.float))
+        except AttributeError:
+            return torch.zeros(population0.shape[0])
 
         return torch.sum((latent0 - latent1)**2, dim=1)**.5
         
