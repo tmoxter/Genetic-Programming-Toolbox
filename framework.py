@@ -6,13 +6,13 @@ from joblib import Parallel, delayed
 
 class Framework:
 
-    def __init__(self, x, nodes, max_depth) -> None:
+    def __init__(self, x, nodes, max_depth, max_cpu_count :int = 100) -> None:
 
         n_constants = self._gen_alphabet(nodes, x)
         self.max_depth, self.xdata = max_depth, x
         self.leaf_info = ((2**(max_depth+1)+1)//2, n_constants+x.shape[1])
         self.treeshape = (2**(max_depth+1)-1, len(self.nodes))
-        self.n_workers = multiprocessing.cpu_count()
+        self.n_workers = min(multiprocessing.cpu_count(), max_cpu_count)
 
     def new_population(self, population_size : int):
         sample_intern = torch.randint(0, self.treeshape[1]-self.leaf_info[1],
@@ -62,12 +62,13 @@ class Framework:
     def evaluate(self, population : torch.tensor):
         indices = torch.argmax(population, dim=2)
         batch = population.shape[0] // self.n_workers
+        batch = max(batch, 1)
         semantics = torch.vstack(
             Parallel(n_jobs=self.n_workers)(
             delayed(self._evaluate_atomic_functions)(
-                indices[i*batch:min((i+1)*batch, indices.shape[0])]
+                indices[i*batch:min((i+1)*batch, indices.shape[0]+1)]
             )
-            for i in range(self.n_workers+1)
+            for i in range(self.n_workers+2)
             )
         )
 
@@ -127,12 +128,13 @@ class Framework:
     def semantic_embedding(self, semantics : torch.tensor):
         
         batch = semantics.shape[0] // self.n_workers
+        batch = max(batch, 1)
         embedding = torch.vstack(
             Parallel(n_jobs=self.n_workers)(
             delayed(self._semantic_batch)(
-                semantics[i*batch:min((i+1)*batch, semantics.shape[0])]
+                semantics[i*batch:min((i+1)*batch, semantics.shape[0]+1)]
             )
-            for i in range(self.n_workers+1)
+            for i in range(self.n_workers+2)
             )
         )
 
