@@ -1,6 +1,6 @@
 import torch
 from torch.nn import functional as F
-from itertools import product
+from copy import deepcopy
 import multiprocessing
 from joblib import Parallel, delayed
 
@@ -250,26 +250,6 @@ class Framework:
         :torch.Tensor: fitness distance between population and offspring"""
         return torch.abs(fitness0 - fitness1)
     
-    def enumerate_full_space(self):
-        """
-        Enumerate the full space of possible trees with the given
-        framework parameters.
-        Returns
-        -------
-        :torch.Tensor: full space of possible trees
-        """
-        assert self.treeshape[0] < 8, "Too many nodes to enumerate"
-        space_size = self.treeshape[1]**(self.treeshape[0]//2)\
-                    *self.leaf_info[1]**(self.treeshape[0]//2+1)
-        leaf_min_val = self.treeshape[1] - self.leaf_info[1]
-        leaf_min_id = self.treeshape[0]//2+1
-        space_ids = torch.cartesian_prod(*(torch.arange(self.treeshape[1]).expand(self.treeshape[0], -1)))
-        space_ids = space_ids[(space_ids[:, -leaf_min_id:] >= leaf_min_val).all(dim=1)]
-
-        assert space_ids.shape[0] == space_size, "Space size mismatch"
-
-        return self.syntactic_embedding(space_ids)
-
     def _gen_alphabet(self, nodes : list, x : torch.tensor):
         """Return the torch callables as well string representations of the
         nodes in the framework alphabet.
@@ -348,3 +328,141 @@ class Framework:
         self.atomic_expr = {key: val for key, val in enumerate(used_str)}
         
         return n_constants
+    
+    def enumerate_full_space(self, y : torch.Tensor):
+        """
+        Enumerate the full space of possible trees with the given
+        framework parameters.
+        Returns
+        -------
+        :torch.Tensor: full space of possible trees
+        """
+        assert self.treeshape[0] < 8, "Too many nodes to enumerate"
+        space_size = self.treeshape[1]**(self.treeshape[0]//2)\
+                    *self.leaf_info[1]**(self.treeshape[0]//2+1)
+        leaf_min_val = self.treeshape[1] - self.leaf_info[1]
+        leaf_min_id = self.treeshape[0]//2+1
+        space_ids = torch.cartesian_prod(*(
+            torch.arange(self.treeshape[1]).expand(self.treeshape[0], -1)
+            ))
+        space_ids = space_ids[
+            (space_ids[:, -leaf_min_id:] >= leaf_min_val).all(dim=1)
+            ]
+        assert space_ids.shape[0] == space_size, "Space size mismatch"
+        self.configspace = self.syntactic_embedding(space_ids)
+        self.config_semantics = self.evaluate(self.configspace)
+        self.config_fitness = self.fitness(self.config_semantics, y)
+        self.global_optima = self.configspace[self.config_fitness == self.config_fitness.max()]
+
+        return self.configspace, self.config_semantics, \
+                self.config_fitness, self.global_optima
+    
+    def neighborhood_search(self, indices : torch.Tensor, fastfitness : callable):
+        """
+        Perform a neighborhood search on the given indices.
+        Parameters
+        ----------
+        indices :torch.Tensor
+            indices of the current solution
+        
+        Returns
+        -------
+        :torch.Tensor: indices of the fittest solution in the neighborhood
+        """
+        tree_len = indices.shape[0]
+        only_internal = self.treeshape[1] - self.leaf_info[1]
+        fittest_state = deepcopy(indices)
+        var = deepcopy(indices)
+        fitnesses = fastfitness(var)
+        for j in range(tree_len//2):
+            for _ in range(1, self.treeshape[1]):           
+                var[j] = (var[j] + 1) % self.treeshape[1]
+                new_fitnesses = fastfitness(var)
+                improved = new_fitnesses > fitnesses
+                if improved:
+                    fittest_state, fitnesses = var, new_fitnesses
+            var = deepcopy(indices)
+        for j in range(tree_len//2, tree_len):
+            for _ in range(1, self.leaf_info[1]):
+                var[j] = (var[j] - only_internal + 1) \
+                        % self.leaf_info[1] + only_internal
+                new_fitnesses = fastfitness(var)
+                improved = new_fitnesses > fitnesses
+                if improved:
+                    fittest_state, fitnesses = var, new_fitnesses
+            var = deepcopy(indices)
+
+        return fittest_state, (fittest_state == indices).all()
+        
+    def _hillclimbing(self):
+        """
+        Map all solutions to their local optima. By hillclimbing with exhaustove
+        neighborhood search from every state.
+        
+        Returns
+        -------
+        :torch.Tensor: indices of the local optima"""
+
+        fitness_lookup = {tuple(self.configspace[i].argmax(dim=1).tolist()):
+                        self.config_fitnesss[i]
+                        for i in range(self.configspace.size(0))}
+        fastfitness = lambda x: fitness_lookup[tuple(x.tolist())]
+
+        belongs_to_basin = torch.zeros(self.configspace.size(0))
+        # --- recursive descent to local optimum ---
+        def descent(state):
+            new_state, is_locopt = self.neighborhood_search(state, fastfitness)
+            return state if is_locopt else descent(new_state)
+        # ---
+        for i in range(self.configspace.size(0)):
+            state = descent(self.configspace[i].argmax(dim=1))
+            belongs_to_basin[i] = (
+                state.expand(self.configspace.size(0), -1) == self.configspace.argmax(dim=2)
+                ).all(dim=1).nonzero()[0]
+        
+        return belongs_to_basin
+            
+    def local_optima_network(self):
+        """
+        Compute the nodes (local optima) and edges (basin transition edges)
+        of the local optima network of the problem landscape
+        Implementation of Gabriela Ochoa et al. DOI 10.1007/978-3-642-41888-4, ch. 9
+        for GP.
+
+        Returns
+        -------
+        local_optima : list
+            list of local optima
+        basin_trans_edges : torch.Tensor
+            matrix of basin transition edges
+        
+        """
+        try:
+            belongs_to_basin = self._hillclimbing()
+        except AttributeError:
+            self.enumerate_full_space()
+            belongs_to_basin = self._hillclimbing()
+        
+        local_optima = list(set(belongs_to_basin.tolist()))
+        solutions_of_basin = {}
+        for basin_idx in local_optima:
+            solutions_of_basin[int(basin_idx)] = set(
+                belongs_to_basin[belongs_to_basin == basin_idx].nonzero().flatten().tolist()
+            )
+        
+        basin_trans_edges = torch.zeros(len(local_optima), len(local_optima))
+        for i in range(basin_trans_edges.size(0)):
+            basin_i = local_optima[i]
+            cardinality = len(solutions_of_basin[basin_i])
+            for j in range(basin_trans_edges.size(1)):
+                basin_j = local_optima[j]
+                pij = 0
+                for sol_i in solutions_of_basin[basin_i]:
+                    for sol_j in solutions_of_basin[basin_j]:
+                        dist = self.hamming_distance(self.configspace[sol_i].unsqueeze(0),
+                                                     self.configspace[sol_j].unsqueeze(0))
+                        pij += (dist == 1)/self.configspace.size(1)
+                basin_trans_edges[i, j] = pij/cardinality
+        
+        return local_optima, basin_trans_edges
+        
