@@ -3,6 +3,31 @@ import torch.nn as nn
 from copy import deepcopy
 
 class RecurrentAutoEncoder(nn.Module):
+    """Recurrent Autoencoder model based on LSTM modules.
+
+    Parameters
+    ----------
+    framework : Framework
+        The framework object.
+    input_size : int
+        The input dimension of the model.
+    hidden_size : int
+        The hidden dimension of the model.
+    num_layers : int
+        The number of layers of the model.
+    seq_len : int
+        The sequence length of the model.
+
+    Attributes
+    ----------
+    encoder : nn.Module
+        The encoder module.
+    decoder : nn.Module
+        Decoder module.
+    variation : callable
+        The variation operator for the evolution.
+    """
+
     
     def __init__(self, framework, input_size, hidden_size, num_layers, seq_len):
                  
@@ -20,10 +45,16 @@ class RecurrentAutoEncoder(nn.Module):
 
         return decoded
     
-    def variation(self,  population : torch.tensor, *args):
+    def variation(self, population : torch.Tensor, *args, **kwargs):
+        """Variation operator for the evolution of the population.
 
+        Parameters
+        ----------
+        population : torch.Tensor
+            The population of individuals.
+        """
         x = deepcopy(population).type(torch.float)
-        hidden_repr = self.encoder(x)
+        hidden_repr = self.encoder(x)[-1]
         angle = torch.randn_like(hidden_repr)
         norm = torch.sum(angle**2, dim=1)**.5
         angle = torch.divide(angle.T, norm)
@@ -34,17 +65,15 @@ class RecurrentAutoEncoder(nn.Module):
             new_hidden_repr[unchanged] = hidden_repr[unchanged]\
                   + angle.T[unchanged]*step_size
             step_size += increase
-            old = torch.argmax(self.decoder(x, hidden_repr, False), dim=2)
-            new = torch.argmax(self.decoder(x, new_hidden_repr, False), dim=2)
+            old = torch.argmax(self.decoder(x, hidden_repr.unsqueeze(0), False), dim=2)
+            new = torch.argmax(self.decoder(x, new_hidden_repr.unsqueeze(0), False), dim=2)
             unchanged = (old == new).all(dim=1)
             if step_size > 20:
                 break
 
-        new_reconstruction = self.decoder(x, new_hidden_repr, False)
-        old_reconstruction = self.decoder(x, hidden_repr, False)
-        x_new = x + (new_reconstruction - old_reconstruction)
+        new_reconstruction = self.decoder(x, new_hidden_repr.unsqueeze(0), False)
 
-        return self.framework.syntactic_embedding(x_new)
+        return self.framework.syntactic_embedding(new_reconstruction), 0
 
 class RNNEncoder(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers):
