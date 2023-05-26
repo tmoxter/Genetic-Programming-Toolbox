@@ -10,15 +10,15 @@ class ClassicGP:
     def __init__(self, framework : Framework) -> None:
         self.framework = framework
 
-    def variation(self, population : torch.tensor, _,
-                  mutation_chance : float = 0.1,
-                  use_crossover : bool = True) -> torch.tensor:
+    def variation(self, population : torch.tensor,
+                mutation_chance : float = 0.1,
+                local_search_only: bool = False, *args, **kwargs) -> torch.tensor:
         
-        if use_crossover:
+        if not local_search_only:
             offspring = self._crossover(population, uniform_depth=True)
         else:
             offspring = deepcopy(population)
-        return self._mutation(offspring, mutation_chance)
+        return self._mutation(offspring, mutation_chance), 0
 
     def _crossover(self, population : torch.tensor,
                    uniform_depth : bool = True) -> torch.tensor:
