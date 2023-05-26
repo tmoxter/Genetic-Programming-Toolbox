@@ -1,4 +1,5 @@
 import torch
+import math
 from torch.nn import functional as F
 from copy import deepcopy
 import multiprocessing
@@ -148,6 +149,29 @@ class Framework:
 
     def as_tree(self):
         raise NotImplementedError
+    
+    def print_treelike(self, population : torch.tensor):
+        
+        if population.dim() == 2:
+            # --- single solution passed ---
+            population = population.unsqueeze(0)
+
+        levels = int(math.log2(population.size(1))) + 1
+        for tree in population:
+            for i in range(levels):
+                # The number of elements at this level
+                elems = 2 ** i
+                # The starting index of elements at this level in array
+                start = 2 ** i - 1
+                # The ending index of elements at this level in array
+                end = start + elems
+                # Print appropriate number of spaces before elements
+                print(' ' * ((2 ** (levels - i - 1)) - 1), end='')
+                # Print the elements at this level
+                for j in range(start, end):
+                    print(tree[j].argmax().item(), end=' ' * (2 ** (levels - i) - 1))
+                print()
+            print('- '*(population.size(1)//2+1))
 
     def as_expression(self, population : torch.tensor):
         if population.dim() == 2:
