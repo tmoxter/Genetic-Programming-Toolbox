@@ -74,4 +74,5 @@ class SyntaxHC:
                 n_eval += new_fitnesses.shape[0]
             indices = deepcopy(backup)
 
-        return self.framework.syntactic_embedding(fittest_state.type(torch.long)), n_eval
+        return self.framework.syntactic_embedding(fittest_state.type(torch.long))\
+                , n_eval - population.size(0)
