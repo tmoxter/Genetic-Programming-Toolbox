@@ -16,9 +16,9 @@ class ClassicGP:
         
         if not local_search_only:
             offspring = self._crossover(population, uniform_depth=True)
-        else:
-            offspring = deepcopy(population)
-        return self._mutation(offspring, mutation_chance), 0
+            return self._subtree_mutation(offspring, 1), 0
+        else:  
+            return self._subtree_mutation(population, 1), 0
 
     def _crossover(self, population : torch.tensor,
                    uniform_depth : bool = True) -> torch.tensor:
@@ -72,8 +72,8 @@ class ClassicGP:
             
         return offspring
 
-    def _mutation(self, population : torch.tensor,
-                  chance = float) -> torch.tensor:
+    def _mutation(self, population : torch.Tensor,
+                  chance : float = 0) -> torch.Tensor:
 
         tree_len = population.shape[1]
         indices = torch.argmax(population, dim=2).type(torch.float)
@@ -88,3 +88,47 @@ class ClassicGP:
                         population.shape[2])[leaves]
 
         return self.framework.syntactic_embedding(indices.type(torch.long))
+    
+    def _subtree_mutation(self, population : torch.Tensor,
+        uniform_depth : bool = True, chance : float = 1) -> torch.Tensor:
+    
+    
+        tree_len = population.shape[1]
+        depth = int(math.log2(tree_len+1)-1)
+        offspring = deepcopy(population).type(torch.long)
+        selected = torch.rand(population.size(0)) < chance
+        n_selected = torch.sum(selected)
+        st_root = torch.zeros(population.size(0), dtype=torch.long)
+        
+        if uniform_depth:
+            sample_depth = torch.randint(depth+1, (n_selected,))
+            scale = ((2**(sample_depth+1)-1) - (2**sample_depth-1))
+            st_root[selected] = (2**sample_depth-1
+                    + torch.rand((n_selected,)) * scale).type(torch.long)
+                                            
+        else:
+            st_root[selected] = torch.randint(tree_len, (n_selected,))
+            
+        for i in torch.arange(population.size(0))[selected]:
+            subtree_ids = [st_root[i].item()]
+            next_lvl = [st_root[i].item()]
+            for level in range(depth):
+                current_lvl = next_lvl
+                next_lvl = []
+                for node_idx in current_lvl:
+                    child1 = 2 * (node_idx + 1) - 1
+                    child2 = 2 * (node_idx + 1)
+                    if child1 < 2 ** (depth + 1) - 1:
+                        subtree_ids.append(child1)
+                        next_lvl.append(child1)
+                    if child2 < 2 ** (depth + 1) - 1:
+                        subtree_ids.append(child2)
+                        next_lvl.append(child2)
+                    
+            subtree_ids = torch.tensor(subtree_ids).type(torch.long)
+            offspring[i, subtree_ids, :] = self._mutation(
+                population[i].unsqueeze(0), 1
+                )[:, subtree_ids, :]
+            
+        return offspring
+
