@@ -4,6 +4,8 @@ from torch.nn import functional as F
 from copy import deepcopy
 import multiprocessing
 from joblib import Parallel, delayed
+from tqdm import tqdm
+from utils import tqdm_joblib
 
 class Framework:
 
@@ -60,19 +62,31 @@ class Framework:
         return semantics
     
     @torch.no_grad()
-    def evaluate(self, population : torch.tensor):
+    def evaluate(self, population : torch.tensor, touched_genes : list = None,
+                heavy_compute : bool = False):
         indices = torch.argmax(population, dim=2)
         batch = population.shape[0] // self.n_workers
         batch = max(batch, 1)
-        semantics = torch.vstack(
-            Parallel(n_jobs=self.n_workers)(
-            delayed(self._evaluate_atomic_functions)(
-                indices[i*batch:min((i+1)*batch, indices.shape[0]+1)]
+        if heavy_compute:
+            with tqdm_joblib(tqdm(desc="Evaluating syntax", total=self.n_workers+2,
+                                ascii=False)):
+                semantics = torch.vstack(
+                    Parallel(n_jobs=self.n_workers)(
+                    delayed(self._evaluate_atomic_functions)(
+                        indices[i*batch:min((i+1)*batch, indices.shape[0]+1)]
+                    )
+                    for i in range(self.n_workers+2)
+                    )
+                )
+        else:
+            semantics = torch.vstack(
+                Parallel(n_jobs=self.n_workers)(
+                delayed(self._evaluate_atomic_functions)(
+                    indices[i*batch:min((i+1)*batch, indices.shape[0]+1)]
+                )
+                for i in range(self.n_workers+2)
+                )
             )
-            for i in range(self.n_workers+2)
-            )
-        )
-
         return semantics
     
     def syntactic_embedding(self, x : torch.tensor):
@@ -151,25 +165,18 @@ class Framework:
         raise NotImplementedError
     
     def print_treelike(self, population : torch.tensor):
-        
         if population.dim() == 2:
             # --- single solution passed ---
             population = population.unsqueeze(0)
 
-        levels = int(math.log2(population.size(1))) + 1
+        depth = int(math.log2(population.size(1))) + 1
         for tree in population:
-            for i in range(levels):
-                # The number of elements at this level
-                elems = 2 ** i
-                # The starting index of elements at this level in array
-                start = 2 ** i - 1
-                # The ending index of elements at this level in array
+            for i in range(depth):
+                elems, start = 2**i, 2**i - 1
                 end = start + elems
-                # Print appropriate number of spaces before elements
-                print(' ' * ((2 ** (levels - i - 1)) - 1), end='')
-                # Print the elements at this level
+                print(' ' * ((2**(depth - i - 1)) - 1), end='')
                 for j in range(start, end):
-                    print(tree[j].argmax().item(), end=' ' * (2 ** (levels - i) - 1))
+                    print(tree[j].argmax().item(), end=' ' * (2**(depth-i)-1))
                 print()
             print('- '*(population.size(1)//2+1))
 
@@ -357,24 +364,40 @@ class Framework:
         """
         Enumerate the full space of possible trees with the given
         framework parameters.
+
+        Parameters
+        ----------
+        y : torch.Tensor
+            The target values
+
         Returns
         -------
         :torch.Tensor: full space of possible trees
         """
-        assert self.treeshape[0] < 8, "Too many nodes to enumerate"
+
+        size = (self.treeshape[1]-self.leaf_info[1])**(self.treeshape[0]//2)\
+                *self.leaf_info[1]**(self.treeshape[0]//2+1)
+        print("Size of configuration space: %s"%size)
+        #assert self.treeshape[0] < 8, "Too many nodes to enumerate"
+
         space_size = self.treeshape[1]**(self.treeshape[0]//2)\
                     *self.leaf_info[1]**(self.treeshape[0]//2+1)
         leaf_min_val = self.treeshape[1] - self.leaf_info[1]
         leaf_min_id = self.treeshape[0]//2+1
-        space_ids = torch.cartesian_prod(*(
-            torch.arange(self.treeshape[1]).expand(self.treeshape[0], -1)
-            ))
-        space_ids = space_ids[
-            (space_ids[:, -leaf_min_id:] >= leaf_min_val).all(dim=1)
-            ]
+        try:
+            space_ids = torch.cartesian_prod(*(
+                torch.arange(self.treeshape[1]).expand(self.treeshape[0], -1)
+                ))
+            space_ids = space_ids[
+                (space_ids[:, -leaf_min_id:] >= leaf_min_val).all(dim=1)
+                ]
+        except RuntimeError as e:
+            print("# - Configuration space is too large: {%s} - #"%str(e))
+            return None, None, None, None
         assert space_ids.shape[0] == space_size, "Space size mismatch"
         self.configspace = self.syntactic_embedding(space_ids)
-        self.config_semantics = self.evaluate(self.configspace)
+        self.config_semantics = self.evaluate(self.configspace,
+                                            heavy_compute=True)
         self.config_fitness = self.fitness(self.config_semantics, y)
         self.global_optima = self.configspace[self.config_fitness == self.config_fitness.max()]
 
