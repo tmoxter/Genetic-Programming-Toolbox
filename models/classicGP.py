@@ -46,7 +46,10 @@ class ClassicGP:
             return self._subtree_mutation(population, 1), 0
         if operator == "node-mutation":
             # --- --- muatation chance is per node --- ---
-            return self._mutation(population, mutation_chance), 0
+            return self._mutation(population, 1/population.size(0)), 0
+        
+        raise NotImplementedError("Operator {} not implemented."
+                                  .format(operator))
 
     def _crossover(self, population : torch.tensor,
                    uniform_depth : bool = True) -> torch.tensor:
