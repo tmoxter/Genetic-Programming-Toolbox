@@ -6,23 +6,52 @@ import math
 from framework import Framework
 
 class ClassicGP:
+    """
+    Classic GP model to perform standard gp variation operators
+    'crossover', 'subtree-mutation', 'node-mutation'.
+
+    Parameters
+    ----------
+    framework : Framework
+        The framework object.
+    """
 
     def __init__(self, framework : Framework) -> None:
         self.framework = framework
 
     def variation(self, population : torch.tensor,
                 mutation_chance : float = 0.1,
-                local_search_only: bool = False, *args, **kwargs) -> torch.tensor:
+                operator : str = "subtree-mutation", *args, **kwargs) -> torch.tensor:
+        """
+        Parameters
+        ----------
+        population : torch.tensor
+            The population to be varied.
+        mutation_chance : float, optional
+            The chance of mutation, by default 0.1
+        operator : str, ['crossover', 'subtree-mutation', 'node-mutation']
+            The variation operator to be used, by default "subtree-mutation"
         
-        if not local_search_only:
+        Returns
+        -------
+        torch.tensor
+            The varied population.
+        """
+        if operator == "crossover":
             offspring = self._crossover(population, uniform_depth=True)
-            return self._subtree_mutation(offspring, 1), 0
-        else:  
+            # --- --- muatation chance is per node --- ---
+            return self._subtree_mutation(offspring, mutation_chance), 0
+        if operator == "subtree-mutation":
+            # --- --- muatation chance is per tree (=1) --- ---
             return self._subtree_mutation(population, 1), 0
+        if operator == "node-mutation":
+            # --- --- muatation chance is per node --- ---
+            return self._mutation(population, mutation_chance), 0
 
     def _crossover(self, population : torch.tensor,
                    uniform_depth : bool = True) -> torch.tensor:
-        # --- > Implement test for even population sizes or handle edge case
+        # --- check if population size is even ---
+        assert population.shape[0] % 2 == 0, "Population size must be even."
         pop_size, tree_len = population.shape[:-1]
         depth = int(math.log2(tree_len+1)-1)
         offspring = torch.zeros_like(population)
@@ -30,7 +59,7 @@ class ClassicGP:
         parent_pairs = [(i, i + pop_size//2)
                         for i in torch.randperm(pop_size//2)]
         for (parent_a_idx, parent_b_idx) in parent_pairs:
-            # --- > implement also Ito's fair-depth subtree selection method,
+            # --- > implement also Ito's fair-depth subtree selection method?
             #       however equal probability sampling has been shown to be more effective in RDO
             if uniform_depth:
                 sample_depth = torch.randint(depth+1, (1,)).item()
@@ -73,7 +102,7 @@ class ClassicGP:
         return offspring
 
     def _mutation(self, population : torch.Tensor,
-                  chance : float = 0) -> torch.Tensor:
+                  chance : float = 1) -> torch.Tensor:
 
         tree_len = population.shape[1]
         indices = torch.argmax(population, dim=2).type(torch.float)
@@ -128,7 +157,7 @@ class ClassicGP:
             subtree_ids = torch.tensor(subtree_ids).type(torch.long)
             offspring[i, subtree_ids, :] = self._mutation(
                 population[i].unsqueeze(0), 1
-                )[:, subtree_ids, :]
+                )[0, subtree_ids, :]
             
         return offspring
 
