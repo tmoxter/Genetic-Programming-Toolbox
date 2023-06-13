@@ -46,7 +46,7 @@ class ClassicGP:
             return self._subtree_mutation(population, 1), 0
         if operator == "node-mutation":
             # --- --- muatation chance is per node --- ---
-            return self._mutation(population, 1/population.size(0)), 0
+            return self._node_mutation(population), 0
         
         raise NotImplementedError("Operator {} not implemented."
                                   .format(operator))
@@ -159,8 +159,18 @@ class ClassicGP:
                     
             subtree_ids = torch.tensor(subtree_ids).type(torch.long)
             offspring[i, subtree_ids, :] = self._mutation(
-                population[i].unsqueeze(0), 1
+                population[i].unsqueeze(0), chance=1
                 )[0, subtree_ids, :]
             
         return offspring
 
+    def _node_mutation(self, population : torch.Tensor):
+        """Uniformly sample node and replace with random node."""
+
+        selected = torch.randint(population.size(1), (population.size(0),))
+        offspring = deepcopy(population)
+        offspring[torch.arange(population.size(0)), selected, :] = self._mutation(
+                population, chance=1
+                )[torch.arange(population.size(0)), selected, :]
+
+        return offspring
