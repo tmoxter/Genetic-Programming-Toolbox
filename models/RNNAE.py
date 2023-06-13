@@ -45,7 +45,9 @@ class RecurrentAutoEncoder(nn.Module):
 
         return decoded
     
-    def variation(self, population : torch.Tensor, *args, **kwargs):
+    def variation(self, population : torch.Tensor, step_size : float = 0.00,
+                local_search_only : bool = False,
+                *args, **kwargs):
         """Variation operator for the evolution of the population.
 
         Parameters
@@ -53,27 +55,38 @@ class RecurrentAutoEncoder(nn.Module):
         population : torch.Tensor
             The population of individuals.
         """
-        x = deepcopy(population).type(torch.float)
-        hidden_repr = self.encoder(x)[-1]
-        angle = torch.randn_like(hidden_repr)
-        norm = torch.sum(angle**2, dim=1)**.5
-        angle = torch.divide(angle.T, norm)
-        new_hidden_repr = torch.zeros_like(hidden_repr)
-        unchanged = torch.ones(hidden_repr.shape[0], dtype=bool)
-        step_size, increase = 0, 0.025
-        while unchanged.any(): 
-            new_hidden_repr[unchanged] = hidden_repr[unchanged]\
-                  + angle.T[unchanged]*step_size
-            step_size += increase
+        if local_search_only:
+            x = deepcopy(population).type(torch.float)
+            hidden_repr = self.encoder(x)
+            new_hidden_repr = torch.zeros_like(hidden_repr)
+            #old = torch.argmax(self.decoder(x, hidden_repr.unsqueeze(0), False), dim=2)
+            unchanged = torch.ones(hidden_repr.shape[1], dtype=bool)
+            steps = 0
+            while unchanged.any(): 
+                angle = torch.randn_like(hidden_repr)
+                angle = torch.divide(angle, torch.norm(angle, dim=1, keepdim=True))
+                new_hidden_repr[:, unchanged, :] = hidden_repr[:, unchanged, :]\
+                    + angle[:, unchanged, :]*step_size
+                new = torch.argmax(self.decoder(x, new_hidden_repr, False), dim=2)
+                unchanged = (population.argmax(dim=2) == new).all(dim=1)
+                steps += 1
+                if steps > 100:
+                    break
+
+            return self.framework.syntactic_embedding(new), 0
+        
+        else:
+            x = deepcopy(population).type(torch.float)
+            hidden_repr = self.encoder(x)[-1]
+            new_hidden_repr = torch.zeros_like(hidden_repr)
             old = torch.argmax(self.decoder(x, hidden_repr.unsqueeze(0), False), dim=2)
+            # --- fit gaussian to the population ---
+            mu = torch.mean(hidden_repr, dim=0)
+            sigma = torch.std(hidden_repr, dim=0)
+            # --- sample new hidden representations ---
+            new_hidden_repr = torch.randn_like(hidden_repr)*sigma + mu
             new = torch.argmax(self.decoder(x, new_hidden_repr.unsqueeze(0), False), dim=2)
-            unchanged = (old == new).all(dim=1)
-            if step_size > 20:
-                break
-
-        new_reconstruction = self.decoder(x, new_hidden_repr.unsqueeze(0), False)
-
-        return self.framework.syntactic_embedding(new_reconstruction), 0
+            return self.framework.syntactic_embedding(new), 0
 
 class RNNEncoder(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers):
@@ -81,7 +94,7 @@ class RNNEncoder(nn.Module):
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers,
-                            batch_first=True)
+                            batch_first=True, dropout=0.4)
 
     def forward(self, x):
         h0 = torch.zeros(self.num_layers, x.size(0),
@@ -91,7 +104,7 @@ class RNNEncoder(nn.Module):
 
         _, (hn, _) = self.lstm(x, (h0, c0))
 
-        return hn
+        return torch.tanh(hn)
 
 class RNNDecoder(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers):
@@ -99,7 +112,7 @@ class RNNDecoder(nn.Module):
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers,
-                            batch_first=True)
+                            batch_first=True, dropout=0.4)
         self.fc = nn.Linear(hidden_size, input_size)
     
     def forward(self, x : torch.tensor, hx : torch.tensor,
@@ -111,7 +124,8 @@ class RNNDecoder(nn.Module):
         token = torch.zeros(x.shape[0], x.shape[2])
         for t in range(decoder_sequence.shape[1]):
             _, (h, c) = self.lstm(token.unsqueeze(1), (h, c))
-            token = self.fc(h[self.num_layers-1])
+            #token = torch.softmax(self.fc(h[self.num_layers-1]), dim=1)
+            token = torch.sigmoid(self.fc(h[self.num_layers-1]))
             decoder_sequence[:, t, :] = token
 
             if teacher_forcing:
