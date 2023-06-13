@@ -40,8 +40,10 @@ class Framework:
             resample = self.new_population(population_size)
             resample_fitness = self.fitness(self.evaluate(resample), ydata)
             sample[idx, :, :] = resample[torch.argsort(resample_fitness)][-idx.sum():]
-            fitness = self.fitness(self.evaluate(sample), ydata)
+            semantics = self.evaluate(sample)
+            fitness = self.fitness(semantics, ydata)
         return sample, fitness
+        #return sample, semantics, fitness
     
     def _evaluate_atomic_functions(self, indices : torch.tensor,
                                    touched_genes : list = None):
@@ -140,18 +142,31 @@ class Framework:
         return embedding
 
     @torch.no_grad()
-    def semantic_embedding(self, semantics : torch.tensor):
+    def semantic_embedding(self, semantics : torch.tensor,
+                           heavy_compute : bool = False):
         
         batch = semantics.shape[0] // self.n_workers
         batch = max(batch, 1)
-        embedding = torch.vstack(
-            Parallel(n_jobs=self.n_workers)(
-            delayed(self._semantic_batch)(
-                semantics[i*batch:min((i+1)*batch, semantics.shape[0]+1)]
+        if heavy_compute:
+            with tqdm_joblib(tqdm(desc="Generating embedding", total=self.n_workers+2,
+                                ascii=False)):
+                embedding = torch.vstack(
+                Parallel(n_jobs=self.n_workers)(
+                delayed(self._semantic_batch)(
+                    semantics[i*batch:min((i+1)*batch, semantics.shape[0]+1)]
+                )
+                for i in range(self.n_workers+2)
+                )
             )
-            for i in range(self.n_workers+2)
+        else:
+            embedding = torch.vstack(
+                Parallel(n_jobs=self.n_workers)(
+                delayed(self._semantic_batch)(
+                    semantics[i*batch:min((i+1)*batch, semantics.shape[0]+1)]
+                )
+                for i in range(self.n_workers+2)
+                )
             )
-        )
 
         return embedding.nan_to_num(0, 1e9, -1e9)
     
@@ -360,7 +375,9 @@ class Framework:
         
         return n_constants
     
-    def enumerate_full_space(self, y : torch.Tensor):
+    def enumerate_full_space(self, y : torch.Tensor) -> tuple[torch.Tensor,
+                                    torch.Tensor,torch.Tensor, torch.Tensor]:
+                                                              
         """
         Enumerate the full space of possible trees with the given
         framework parameters.
@@ -372,7 +389,10 @@ class Framework:
 
         Returns
         -------
-        :torch.Tensor: full space of possible trees
+        :torch.Tensor: full space of possible trees,
+        :torch.Tensor: semantics of search space,
+        :torch.Tensor: fitness of search space,
+        :torch.Tensor: global optima
         """
 
         size = (self.treeshape[1]-self.leaf_info[1])**(self.treeshape[0]//2)\
