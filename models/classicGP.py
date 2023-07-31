@@ -12,16 +12,20 @@ class ClassicGP:
 
     Parameters
     ----------
-    framework : Framework
-        The framework object.
+    framework : Framework-object
+        The framework object,
+    operator : str, ['mixed' (i.e. crossover & subtree mut.), 'subtree-mutation', 'node-mutation']
+            The variation operator to be used, by default "subtree-mutation"
     """
 
-    def __init__(self, framework : Framework) -> None:
+    def __init__(self, framework : Framework,
+                 operator : str = "subtree-mutation"):
         self.framework = framework
+        self.operator = operator
 
     def variation(self, population : torch.tensor,
                 mutation_chance : float = 0.1,
-                operator : str = "subtree-mutation", *args, **kwargs) -> torch.tensor:
+                *args, **kwargs) -> torch.tensor:
         """
         Parameters
         ----------
@@ -29,27 +33,33 @@ class ClassicGP:
             The population to be varied.
         mutation_chance : float, optional
             The chance of mutation, by default 0.1
-        operator : str, ['crossover', 'subtree-mutation', 'node-mutation']
-            The variation operator to be used, by default "subtree-mutation"
         
         Returns
         -------
         torch.tensor
             The varied population.
         """
-        if operator == "crossover":
+        if self.operator == "mixed":
             offspring = self._crossover(population, uniform_depth=True)
             # --- --- muatation chance is per node --- ---
-            return self._subtree_mutation(offspring, mutation_chance), 0
-        if operator == "subtree-mutation":
+            offspring = self._subtree_mutation(offspring, mutation_chance)
+            offspring_semantics = self.framework.evaluate(offspring)
+            return offspring, offspring_semantics, 0
+        if self.operator == "subtree-mutation":
             # --- --- muatation chance is per tree (=1) --- ---
-            return self._subtree_mutation(population, 1), 0
-        if operator == "node-mutation":
-            # --- --- muatation chance is per node --- ---
-            return self._node_mutation(population), 0
+            offspring = self._subtree_mutation(population, 1)
+            offspring_semantics = self.framework.evaluate(offspring)
+            return offspring, offspring_semantics, 0
+        if self.operator == "node-mutation":
+            # --- --- unsed as variation operator --- ---
+            #( --- --- muatation chance is per node --- --- )
+            offspring = self._node_mutation(population)
+            offspring_semantics = self.framework.evaluate(offspring)
+            return offspring, offspring_semantics, 0
         
-        raise NotImplementedError("Operator {} not implemented."
-                                  .format(operator))
+        raise NotImplementedError("Operator {} not implemented. Choose from ".format(self.operator)\
+                                  +"'mixed','subtree-mutation', 'node-mutation'"
+                                  )
 
     def _crossover(self, population : torch.tensor,
                    uniform_depth : bool = True) -> torch.tensor:
@@ -76,7 +86,7 @@ class ClassicGP:
     
             subtree_ids = [st_root]
             next_lvl = [st_root]
-            for level in range(depth):
+            for _ in range(depth):
                 current_lvl = next_lvl
                 next_lvl = []
                 for node_idx in current_lvl:
@@ -174,3 +184,13 @@ class ClassicGP:
                 )[torch.arange(population.size(0)), selected, :]
 
         return offspring
+    
+    def _protect(self, offspring : torch.Tensor, population : torch.Tensor):
+        # --- --- syntactic protection and rejection --- ---                            
+        leaves = offspring.argmax(dim=2)[:, -self.framework.leaf_info[0]:]
+        leaf_primitive = self.framework.treeshape[1] - self.framework.leaf_info[1]
+        refuse = (leaves < leaf_primitive).any(dim=1)
+        offspring[refuse] = population[refuse]
+        return offspring
+        
+        

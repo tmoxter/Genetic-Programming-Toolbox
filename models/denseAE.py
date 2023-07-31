@@ -15,6 +15,8 @@ class DenseAutoencoder(nn.Module):
         The hidden dimension of the model.
     n_decoder_heads : int, optional
         The number of decoder heads. The default is 1.
+    operator : str, optional
+        The variation operator to be used. The default is "local".
     
     Attributes
     ----------
@@ -25,25 +27,27 @@ class DenseAutoencoder(nn.Module):
     variation : callable
         The variation operator for the evolution."""
     
-    def __init__(self, framework, input_dim, hidden_dim, n_decoder_heads : int = 1):
+    def __init__(self, framework, input_dim, hidden_dim, n_decoder_heads : int = 1,
+                 operator : str = "local", dropout : float = 0.25):
         super(DenseAutoencoder, self).__init__()
 
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
-            nn.Dropout(0.25),
+            nn.Dropout(dropout),
             nn.Tanh())
         
         self.decoder = list()
         for n in range(n_decoder_heads):
             self.__dict__["_modules"][f"deco_head{n}"] = nn.Sequential(
                 nn.Linear(hidden_dim, input_dim),
-                nn.Dropout(0.25),
+                nn.Dropout(dropout),
                 nn.LeakyReLU()
                 )
             self.decoder.append(self.__dict__["_modules"][f"deco_head{n}"])
         
         self.input_dim = input_dim
         self.framework = framework
+        self.operator = operator
         self.n_decoder_heads = n_decoder_heads
 
     def forward(self, x : torch.tensor):
@@ -56,29 +60,37 @@ class DenseAutoencoder(nn.Module):
         y = y.reshape(y.shape[0], *reshape)
         return y
     
-    def variation(self, population : torch.tensor,
-            operator : str = "local", *args, **kwargs)-> torch.tensor:
+    def variation(self, population : torch.Tensor, semantics : torch.Tensor,
+             *args, **kwargs)-> torch.Tensor:
         """Perform variation in the model's latent space.
 
         Parameters
         ----------
         population : torch.tensor
             The population to be varied.
-        operator : str, optional
-            The variation operator to be used. The default is "local".
+        operator : str, optional 
+            The variation operator to be used. ["local", "crossover"] The default is "local".
 
         Returns
         -------
-        offspring : torch.tensor"""
+        offspring : torch.Tensor"""
         
         self.eval()
-        if operator == "crossover":
-            return self._crossover(population)
-        elif operator == "local":
-            return self._local_variation(population)
+        seia = self.framework.semantic_embedding(semantics)
+        if self.operator == "crossover":
+            offspring = self._crossover(seia)
+            offspring = self._protect(offspring, population)
+            offspring_semantics = self.framework.evaluate(offspring)
+            return offspring, offspring_semantics, 0
+        
+        elif self.operator == "local":
+            offspring, n_eval = self._local_variation(seia)
+            offspring = self._protect(offspring, population)
+            offspring_semantics = self.framework.evaluate(offspring)
+            return offspring, offspring_semantics, n_eval
         else:
             raise NotImplementedError(
-                "Operator {} not implemented".format(operator))
+                "Operator {} not implemented".format(self.operator))
     
     def _crossover(self, population : torch.tensor) -> torch.tensor:
         raise NotImplementedError
@@ -145,9 +157,13 @@ class DenseAutoencoder(nn.Module):
                 print("Step size too large, breaking")
                 break
         
-        # x = x.reshape(reshape)
-        # mask = [x == old_reconstruction]
-        # x_new = x[mask] = new_reconstruction[mask]
-        #x_new = x.reshape(reshape) + (new_reconstruction - old_reconstruction)
-        
-        return self.framework.syntactic_embedding(new_reconstruction), 0
+        return self.framework.syntactic_embedding(new_reconstruction),\
+                self.framework.treeshape[0] * self.framework.treeshape[1]/2
+    
+    def _protect(self, offspring : torch.Tensor, population : torch.Tensor):
+        # --- --- syntactic protection and rejection --- ---                            
+        leaves = offspring.argmax(dim=2)[:, -self.framework.leaf_info[0]:]
+        leaf_primitive = self.framework.treeshape[1] - self.framework.leaf_info[1]
+        refuse = (leaves < leaf_primitive).any(dim=1)
+        offspring[refuse] = population[refuse]
+        return offspring

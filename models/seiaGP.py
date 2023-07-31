@@ -9,12 +9,25 @@ import math
 from framework import Framework
 
 class SeiaGP:
+    """
+    SEIA GP model to perform standard gp variation operators
+    'crossover', 'subtree-mutation', 'node-mutation'.
+    
+    Parameters
+    ----------
+    framework : Framework-object
+        The framework object,
+    operator : str, ['closest', 'subtree-mutation', 'node-mutation']
+            The variation operator to be used, by default "subtree-mutation"
+    """
 
-    def __init__(self, framework : Framework) -> None:
+    def __init__(self, framework : Framework,
+                operator : str = "subtree-mutation"):
         self.framework = framework
+        self.operator = operator
     
     def variation(self, population : torch.Tensor, semantics : torch.Tensor,
-                 step_size : float = 1, operator : str = "subtree-mutation",
+                 step_size : float = 1,
                  *args, **kwargs) -> torch.Tensor:
         """
         Parameters
@@ -25,25 +38,34 @@ class SeiaGP:
             The semantics of the population.
         step_size : float, optional
             The step size for the variation operator, by default 1
-        operator : str, ['crossover', 'subtree-mutation', 'node-mutation']
-            The variation operator to be used, by default "subtree-mutation"
         
         Returns
         -------
         torch.Tensor
             The varied population.
         """
-        
-        if operator == "closest":
-            return self._force_closest(population, semantics)
-        if operator == "subtree-mutation":
-            return self._subtree_mutation(population, semantics,
+    
+        if self.operator == "closest":
+            offspring, n_eval = self._force_closest(population, semantics)
+            offspring = self._protect(offspring, population)
+            offspring_semantics = self.framework.evaluate(offspring)
+            return offspring, offspring_semantics, n_eval
+        if self.operator == "subtree-mutation":
+            offspring, n_eval = self._subtree_mutation(population, semantics,
                                           step_size=step_size)
-        if operator == "node-mutation":
-            return self._node_mutation(population, semantics)
+            offspring = self._protect(offspring, population)
+            offspring_semantics = self.framework.evaluate(offspring)
+            assert offspring.shape == population.shape and\
+                offspring_semantics.shape == semantics.shape
+            return offspring, offspring_semantics, n_eval
+        if self.operator == "node-mutation":
+            offspring, n_eval = self._node_mutation(population, semantics)
+            offspring = self._protect(offspring, population)
+            offspring_semantics = self.framework.evaluate(offspring)
+            return offspring, offspring_semantics, n_eval
        
         raise NotImplementedError("Operator {} not implemented."
-                                  .format(operator))
+                                  .format(self.operator))
     
     def _force_closest(self, population : torch.Tensor,
                        semantics : torch.Tensor) -> torch.Tensor:
@@ -79,7 +101,7 @@ class SeiaGP:
     
     def _subtree_mutation(self, population : torch.Tensor, semantics : torch.Tensor,
         uniform_depth : bool = True, step_size : float = 1) -> torch.Tensor:
-        """Sample subtree, perform local pertubation in (flat) SEIA space"""
+        """Sample subtree, perform local pertubation in NISSP-encoded space"""
 
         seia = self.framework.semantic_embedding(semantics)
                 
@@ -116,10 +138,10 @@ class SeiaGP:
                     
             subtree_ids = torch.tensor(subtree_ids).type(torch.long)
             subtree = seia[i, subtree_ids, :]
-            angle = torch.rand_like(subtree).flatten(1)
+            angle = torch.randn_like(subtree).flatten(1)
             angle = angle.div(torch.norm(angle, p=2, dim=1, keepdim=True))
             subtree += angle.reshape_as(subtree) * step_size
-            subtree[subtree_ids > tree_len//2 ] *= torch.cat(
+            subtree[subtree_ids >= tree_len//2] *= torch.cat(
                 (torch.zeros(population.size(2)- self.framework.leaf_info[1]),
                 torch.ones(self.framework.leaf_info[1]))
             )
@@ -127,3 +149,11 @@ class SeiaGP:
             n_eval += subtree_ids.size(0) * self.framework.treeshape[1]/2
         
         return offspring, n_eval
+    
+    def _protect(self, offspring : torch.Tensor, population : torch.Tensor):
+        # --- --- syntactic protection and rejection --- ---                            
+        leaves = offspring.argmax(dim=2)[:, -self.framework.leaf_info[0]:]
+        leaf_primitive = self.framework.treeshape[1] - self.framework.leaf_info[1]
+        refuse = (leaves < leaf_primitive).any(dim=1)
+        offspring[refuse] = population[refuse]
+        return offspring
