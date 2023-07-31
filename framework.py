@@ -8,6 +8,13 @@ from tqdm import tqdm
 from utils import tqdm_joblib
 
 class Framework:
+    """Singleton to handle formatting i.e. seamlessy switching between
+    1-hot encoding, semantic encoding, trees, readable expressions etc.
+
+    Also function evaluation, fitness, population sampling is implemented.
+    
+    Some miscellanous functionality like full search space enumeration.
+    """
 
     def __init__(self, x, nodes, max_depth, max_cpu_count :int = 100) -> None:
 
@@ -31,19 +38,37 @@ class Framework:
         return self.syntactic_embedding(sample)
     
     def resample_repair_population(self, population_size : int,
-                                            ydata : torch.tensor):
-        sample = self.new_population(population_size)
-        fitness = self.fitness(self.evaluate(sample), ydata)
+                    ydata : torch.tensor, lin_scaling : bool = False) -> tuple:
+        """Sample population that is adequentely fit (beneficial for initializing
+        semantically aware models, without semantic outliers).
+        
+        Parameters
+        ----------
+        population_size : int
+            The number of individuals in the population.
+        ydata : torch.tensor
+            The target data.
+        
+        Returns
+        -------
+        population : torch.Tensor
+            The population.
+        semantics : torch.Tensor
+            The semantics of the population
+        fitness : torch.Tensor
+            The fitness of the population
+        """
+        sample = self.new_population(2*population_size)
+        semantics = self.evaluate(sample)
+        fitness = self.fitness(semantics, ydata, lin_scaling)
         median = torch.median(fitness)
-        while torch.any(fitness < median):
-            idx = fitness < median
-            resample = self.new_population(population_size)
-            resample_fitness = self.fitness(self.evaluate(resample), ydata)
-            sample[idx, :, :] = resample[torch.argsort(resample_fitness)][-idx.sum():]
-            semantics = self.evaluate(sample)
-            fitness = self.fitness(semantics, ydata)
-        return sample, fitness
-        #return sample, semantics, fitness
+        keep = fitness >= median
+        if keep.sum() > population_size:
+            keep = keep.nonzero().flatten()[
+                torch.randperm(keep.sum())[:population_size]
+            ]
+        assert keep.sum() == population_size, "Resampling failure"
+        return sample[keep], semantics[keep], fitness[keep]
     
     def _evaluate_atomic_functions(self, indices : torch.tensor,
                                    touched_genes : list = None):
@@ -67,7 +92,7 @@ class Framework:
     def evaluate(self, population : torch.tensor, touched_genes : list = None,
                 heavy_compute : bool = False):
         indices = torch.argmax(population, dim=2)
-        batch = population.shape[0] // self.n_workers
+        batch = population.shape[0] // self.n_workers +1
         batch = max(batch, 1)
         if heavy_compute:
             with tqdm_joblib(tqdm(desc="Evaluating syntax", total=self.n_workers+2,
@@ -106,21 +131,54 @@ class Framework:
             ], dim = 1)
             return F.one_hot(indices, num_classes=self.treeshape[1])
 
-    def _nodewise_semantic(self, current_semantics: torch.tensor,
+    def _nodewise_semantic(self, current_semantics_: torch.tensor,
                         domains : torch.tensor):
         
-        encoded = torch.zeros(self.treeshape[1], requires_grad=False)
-        case_leaf = int((domains[0] == None)) * (self.treeshape[1] - self.leaf_info[1])
-        for i in range(case_leaf, self.treeshape[1]):
-            compare = self.nodes[i](domains[0], domains[1])
-            encoded[i] = 1/(1+F.mse_loss(compare, current_semantics)*.2)
 
-        sort = encoded.argsort(descending=False)[-5:]
-        masked = torch.zeros_like(encoded, requires_grad=False)
-        #encoded = encoded / encoded[sort].sum()
-        #masked[sort] = F.softmax(encoded[sort], dim=0)
-        masked[sort] = encoded[sort] / encoded[sort].sum()
-        return masked
+        n_samples = 100
+        p = torch.ones(current_semantics.size(0))\
+                /current_semantics_.size(0)
+        idx = p.multinomial(n_samples, replacement=False)
+        try:
+            current_semantics = current_semantics[idx]
+            subset = True
+        except IndexError:
+            subset = False
+
+        encoded = torch.zeros(self.treeshape[1], requires_grad=False)
+        # --- treat leaf nodes ---
+        if domains[0] == None:
+            epsilon = .1
+            for i in range((self.treeshape[1]
+                    - self.leaf_info[1]), self.treeshape[1]):
+                compare = self.nodes[i](domains[0], domains[1])
+                if subset:
+                    compare = compare[idx]
+                encoded[i] = 1/(1+F.mse_loss(compare,
+                            current_semantics)*epsilon)
+            
+            masked = torch.zeros_like(encoded, requires_grad=False)
+            terminals = self.treeshape[1] - self.leaf_info[1]
+            masked[-terminals:] = encoded[-terminals:] / encoded[-terminals:].sum()
+            return masked
+
+        # --- treat internal nodes ---
+        else:
+            epsilon = .3
+            for i in range(0, self.treeshape[1]):
+                if subset:
+                    compare = self.nodes[i](domains[0, idx], domains[1, idx])
+
+                encoded[i] = 1/(1+F.mse_loss(compare,
+                            current_semantics)*epsilon)
+   
+            phi = self.treeshape[1] //2
+            sort = encoded.argsort(descending=False)[-phi:]
+            masked = torch.zeros_like(encoded, requires_grad=False)
+            #encoded = encoded / encoded[sort].sum()
+            #masked[sort] = F.softmax(encoded[sort], dim=0)
+            masked[sort] = encoded[sort] / encoded[sort].sum()
+            return masked
     
     def _semantic_batch(self, batch : torch.tensor):
         
@@ -145,7 +203,7 @@ class Framework:
     def semantic_embedding(self, semantics : torch.tensor,
                            heavy_compute : bool = False):
         
-        batch = semantics.shape[0] // self.n_workers
+        batch = semantics.shape[0] // self.n_workers +1
         batch = max(batch, 1)
         if heavy_compute:
             with tqdm_joblib(tqdm(desc="Generating embedding", total=self.n_workers+2,
@@ -168,13 +226,44 @@ class Framework:
                 )
             )
 
-        return embedding.nan_to_num(0, 1e9, -1e9)
+        return embedding.nan_to_num(0, 1e18, -1e18)
     
-    def fitness(self, semantics : torch.tensor, target : torch.tensor):
-        se = (semantics[:, 0, :] - target.repeat(semantics.shape[0], 1))**2
+    def fitness(self, semantics : torch.tensor, target : torch.tensor,
+                lin_scaling : bool = False):
+        """Determine fitness score of proram semantics.
+        
+        Parameters
+        ----------
+        semantics : torch.tensor
+            The semantics of the program.
+        target : torch.tensor
+            The target values.
+        lin_scaling : bool
+            Whether apply linear scaling.
+        
+        Returns
+        -------
+        :torch.tensor: fitness score of program semantics.
+        """
+        if lin_scaling:
+            y = semantics[:, 0, :]
+            se = torch.zeros_like(y)
+            for i in range(se.size(0)):
+                points = torch.vstack((y[i], target))
+                slope = torch.cov(points)[0,1] / (torch.var(y[i]) + 1e-12)
+                intercept = torch.mean(target) - slope*torch.mean(y[i])
+                se[i] = (slope.item()*y[i] + intercept.item() - target)**2
+        else:
+            se = (semantics[:, 0, :] - target.repeat(semantics.shape[0], 1))**2
         mse = se.mean(dim = 1)
-        mse.nan_to_num_(1e6, 1e6, 1e6)
+        mse.nan_to_num_(1e32, 1e32, 1e32)
         return -mse
+    
+    def classification_fitness(self, semantics : torch.tensor, target : torch.tensor):
+        # --- not fully implemented ---
+        prediction = torch.sigmoid(semantics[:, 0, :])
+        target = target.repeat(semantics.shape[0], 1)
+        return (prediction.round() == target).sum(dim=1).float() / target.shape[1]
 
     def as_tree(self):
         raise NotImplementedError
@@ -234,8 +323,9 @@ class Framework:
         offspring_ids = torch.argmax(population1, dim=2)
         return torch.sum(population_ids != offspring_ids, dim=1)
     
-    def latent_distance(self, population0 : torch.Tensor,
-                        population1 : torch.Tensor, model : torch.nn.Module):
+    def latent_distance(self, population0 : torch.Tensor, semantics0 : torch.Tensor,
+                        population1 : torch.Tensor, semantics1 : torch.Tensor,
+                        model : torch.nn.Module):
         """
         Calculate the latent distance between two populations.
         Parameters
@@ -251,10 +341,8 @@ class Framework:
         :torch.Tensor: latent distance between population and offspring
         """
         try:
-            latent0 = model.encoder(population0.reshape(population0.size(0),
-                                        -1).type(torch.float))
-            latent1 = model.encoder(population1.reshape(population1.size(0),
-                                        -1).type(torch.float))
+            latent0 = model.latent(population0, semantics0)
+            latent1 = model.latent(population1, semantics1)
         except AttributeError:
             return torch.zeros(population0.shape[0])
 
@@ -294,7 +382,7 @@ class Framework:
         Returns
         ---------
         :torch.Tensor: fitness distance between population and offspring"""
-        return torch.abs(fitness0 - fitness1)
+        return fitness0 - fitness1
     
     def _gen_alphabet(self, nodes : list, x : torch.tensor):
         """Return the torch callables as well string representations of the
@@ -343,7 +431,7 @@ class Framework:
             "pow3": [lambda a, b : "(%s)^3"%a, lambda a, b: "(%s)^3"%b],
             "pow4": [lambda a, b : "(%s)^4"%a, lambda a, b: "(%s)^4"%b]
         }
-
+        # --- add unicode pi if used ---
         constants_str = lambda c: c if c[:4] != "3.14" else '\u03C0'
 
         used_callabel = list()
@@ -354,12 +442,14 @@ class Framework:
                 used_callabel += alphabet_callable[node]
                 used_str += alphabet_str[node]
             else:
+                # --- try to treat as a constant ---
                 try:
                     used_callabel.append(
-                        lambda a, b : torch.tensor(float(node)).repeat(x.shape[0])
+                        lambda a, b, func = node : torch.tensor(
+                                            float(func)).repeat(x.shape[0])
                     )
                     used_str.append(
-                        lambda a, b, : constants_str(node)
+                        lambda a, b, func = node : constants_str(func)
                     )
                     n_constants += 1
                 except ValueError:
@@ -395,7 +485,7 @@ class Framework:
         :torch.Tensor: global optima
         """
 
-        size = (self.treeshape[1]-self.leaf_info[1])**(self.treeshape[0]//2)\
+        size = (self.treeshape[1])**(self.treeshape[0]//2)\
                 *self.leaf_info[1]**(self.treeshape[0]//2+1)
         print("Size of configuration space: %s"%size)
         #assert self.treeshape[0] < 8, "Too many nodes to enumerate"
