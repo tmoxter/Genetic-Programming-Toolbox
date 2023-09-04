@@ -6,7 +6,7 @@ The models folder contains the variation operators (both explicit and (deep) mod
 
 ## Usage
 Refer to the file 'example_breast_cancer.py' illustrating the configuration and initiation of the algorithms using a breast cancer classification task as an example. In this case a tensor-based implementation of classic GP (baseline) can be compared with the two novel variation operators that provide high locality in symbolic regression (SR) tasks. Refer to 'requirements.txt' for all dependencies. Use 'example_breast_cancer.py' to adjust the configuration, the current config works out-of-the-box.
-'''python
+```python
 python example_breast_cancer.py
-'''
+```
 
